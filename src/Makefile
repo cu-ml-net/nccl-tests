@@ -34,7 +34,7 @@ NVCC_GENCODE ?= -gencode=arch=compute_35,code=sm_35 \
                 -gencode=arch=compute_70,code=compute_70
 endif
 
-NVCUFLAGS  := -ccbin $(CXX) $(NVCC_GENCODE) -std=c++11
+NVCUFLAGS  := -ccbin $(CXX) $(NVCC_GENCODE) -std=c++11 -diag-suppress 174
 CXXFLAGS   := -std=c++11
 
 LDFLAGS    := -L${CUDA_LIB} -lcudart -lrt
@@ -77,6 +77,7 @@ DST_DIR := $(BUILDDIR)
 SRC_FILES := $(wildcard *.cu)
 OBJ_FILES := $(SRC_FILES:%.cu=${DST_DIR}/%.o)
 BIN_FILES_LIST := all_reduce all_gather broadcast reduce_scatter reduce alltoall scatter gather sendrecv hypercube
+# BIN_FILES_LIST := all_reduce
 BIN_FILES := $(BIN_FILES_LIST:%=${DST_DIR}/%_perf)
 
 build: ${BIN_FILES}

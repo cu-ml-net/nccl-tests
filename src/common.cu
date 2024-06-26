@@ -13,14 +13,26 @@
 #include "cuda.h"
 
 #include <time.h>
+#include <string.h> // strcpy
 
 #include "../verifiable/verifiable.h"
 
-#define LOCK_WAIT 2 // seconds
+#define DISABLE_PRINTF 0
+
+#if DISABLE_PRINTF == 1
+#define log_printf(fmt, ...) (0)
+#else
+#define log_printf(...) printf(__VA_ARGS__)
+#endif
+
+#define LOCK_WAIT 0.05 // seconds
 #define FAULT_INJECTION 5 // seconds
 #define STATS_FILE "stats.csv"
 
+// GIULIO global variable with output stats file path
+char stats_file[64] = STATS_FILE;
 bool test_running = false;
+struct timespec test_completion_tstamp;
 
 int test_ncclVersion = 0; // init'd with ncclGetVersion()
 
@@ -410,6 +422,27 @@ testResult_t completeColl(struct threadArgs* args) {
   return testSuccess;
 }
 
+void inject_fault(void){}
+
+void remove_fault(void){}
+
+// GIULIO fault injection thread
+void* fault_inj_thread(void* arg) {
+  // log_printf("Fault injection thread launched at time: %d and going to sleep...\n", time(NULL));
+  // wait
+  sleep(LOCK_WAIT);
+  // check that test is running
+  if (!test_running) {
+    log_printf("Test not running, exiting fault injection thread at time: %d\n", time(NULL));
+    return NULL;
+  }
+  // inject fault
+  inject_fault();
+  clock_gettime(CLOCK_REALTIME, &test_completion_tstamp);
+  log_printf("Injecting fault at time: %llu,%llu\n", test_completion_tstamp.tv_sec, test_completion_tstamp.tv_nsec);
+  return NULL;
+}
+
 testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t op, int root, int in_place) {
   FILE *fptr; // GIULIO
 
@@ -440,7 +473,14 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
   }
 #endif
 
-  printf("Starting performance bench at time: %d\n", time(NULL)); // GIULIO
+  struct timespec bench_tstamp;
+  clock_gettime(CLOCK_REALTIME, &bench_tstamp);
+  log_printf("Starting performance bench at time: %llu,%llu\n", bench_tstamp.tv_sec, bench_tstamp.tv_nsec); // GIULIO
+  // GIULIO launch fault injection thread
+  pthread_t fault_thread;
+  pthread_create(&fault_thread, NULL, fault_inj_thread, NULL);
+  log_printf("Fault injection thread launched at time: %d\n", time(NULL));
+  test_running = true;
   // Performance Benchmark
   timer tim;
   for (int iter = 0; iter < iters; iter++) {
@@ -475,7 +515,11 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
   double cputimeSec = tim.elapsed()/(iters*agg_iters);
   TESTCHECK(completeColl(args));
 
-  printf("Performance bench done at time: %d\n", time(NULL)); // GIULIO
+  // test_running = false;
+  remove_fault();
+  clock_gettime(CLOCK_REALTIME, &bench_tstamp);
+  log_printf("Performance bench ended and fault removed at time: %llu,%llu\n",
+             bench_tstamp.tv_sec, bench_tstamp.tv_nsec); // GIULIO
 
   double deltaSec = tim.elapsed();
   deltaSec = deltaSec/(iters*agg_iters);
@@ -567,13 +611,17 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
   if (args->reportErrors) {
     PRINT("  %7s  %6.2f  %6.2f  %5g", timeStr, algBw, busBw, (double)wrongElts);
     // GIULIO
-    fptr = fopen(STATS_FILE, "a");
-    fprintf(fptr, ",%s,%.2f,%.2f,%g", timeStr, algBw, busBw, (double)wrongElts);
+    fptr = fopen(stats_file, "a");
+    fprintf(fptr, ",%s,%.2f,%.2f,%g,%llu,%llu",
+            timeStr, algBw, busBw, (double)wrongElts,
+            test_completion_tstamp.tv_sec, test_completion_tstamp.tv_nsec);
     fclose(fptr);
   } else {
     PRINT("  %7s  %6.2f  %6.2f  %5s", timeStr, algBw, busBw, "N/A");
-    fptr = fopen(STATS_FILE, "a");
-    fprintf(fptr, ",%s,%.2f,%.2f,%g", timeStr, algBw, busBw, "N/A");
+    fptr = fopen(stats_file, "a");
+    fprintf(fptr, ",%s,%.2f,%.2f,%g,%llu,%llu",
+            timeStr, algBw, busBw, "N/A",
+            test_completion_tstamp.tv_sec, test_completion_tstamp.tv_nsec);
     fclose(fptr);
   }
 
@@ -627,40 +675,41 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* 
       fprintf(fptr, "%li,%li,%s,%s,%s", max(args->sendBytes, args->expectedBytes), args->nbytes / wordSize(type), typeName, opName, rootName);
       fclose(fptr);
       //GIULIO warmup done, test starting, ready to inject fault
-      printf("warmup done at time: %d\n", time(NULL));
-      TESTCHECK(BenchTime(args, type, op, root, 0));
-      printf("first test done at time: %d\n", time(NULL));
+      log_printf("warmup done at time: %d\n", time(NULL));
+      // only do in place test
+      // TESTCHECK(BenchTime(args, type, op, root, 0));
+      // log_printf("first test done at time: %d\n", time(NULL));
       TESTCHECK(BenchTime(args, type, op, root, 1));
-      printf("second test done at time: %d\n", time(NULL));
+      // log_printf("test done at time: %d\n", time(NULL));
       //GIULIO test done, set boolean variable to 1
       PRINT("\n");
-      fptr = fopen(STATS_FILE, "a");
+      fptr = fopen(stats_file, "a");
       fprintf(fptr, "\n");
       fclose(fptr);
   }
   return testSuccess;
 }
 
-// GIULIO fault injection thread
-void* inject_fault(void* arg) {
- printf("Fault injection thread launched at time: %d and going to sleep...\n", time(NULL));
-  // wait
-  sleep(LOCK_WAIT);
-  // check that test is running
-  if (!test_running) {
-    printf("Test not running, exiting fault injection thread at time: %d\n", time(NULL));
-    return NULL;
-  }
-  // inject fault
-  printf("Injecting fault at time: %d\n", time(NULL));
-  // simulate fault with sleep
-  sleep(FAULT_INJECTION);
-  // check that test is running
-  if (!test_running)
-    printf("Test has already ended, exiting fault injection thread at time: %d\n", time(NULL));
-  printf("Fault injection done at time: %d\n", time(NULL));
-  return NULL;
-}
+// // GIULIO fault injection thread
+// void* fault_inj_thread(void* arg) {
+//  log_printf("Fault injection thread launched at time: %d and going to sleep...\n", time(NULL));
+//   // wait
+//   sleep(LOCK_WAIT);
+//   // check that test is running
+//   if (!test_running) {
+//     log_printf("Test not running, exiting fault injection thread at time: %d\n", time(NULL));
+//     return NULL;
+//   }
+//   // inject fault
+//   log_printf("Injecting fault at time: %d\n", time(NULL));
+//   // // simulate fault with sleep
+//   // sleep(FAULT_INJECTION);
+//   // // check that test is running
+//   // if (!test_running)
+//   //   log_printf("Test has already ended, exiting fault injection thread at time: %d\n", time(NULL));
+//   // log_printf("Fault injection done at time: %d\n", time(NULL));
+//   return NULL;
+// }
 
 testResult_t threadRunTests(struct threadArgs* args) {
   // Set device to the first of our GPUs. If we don't do that, some operations
@@ -669,17 +718,17 @@ testResult_t threadRunTests(struct threadArgs* args) {
   CUDACHECK(cudaSetDevice(args->gpus[0]));
 
   // GIULIO launch fault injection thread
-  pthread_t fault_thread;
-  pthread_create(&fault_thread, NULL, inject_fault, NULL);
-  printf("Fault injection thread launched at time: %d\n", time(NULL));
+  // pthread_t fault_thread;
+  // pthread_create(&fault_thread, NULL, inject_fault, NULL);
+  // log_printf("Fault injection thread launched at time: %d\n", time(NULL));
 
-  printf("Test launching at time: %d\n", time(NULL));
-  test_running = true;
+  // log_printf("Test launching at time: %d\n", time(NULL));
+  // test_running = true;
   TESTCHECK(ncclTestEngine.runTest(args, ncclroot, (ncclDataType_t)nccltype, test_typenames[nccltype], (ncclRedOp_t)ncclop, test_opnames[ncclop]));
-  test_running = false;
-  printf("Test ended at time: %d\n", time(NULL));
+  // test_running = false;
+  // log_printf("Test ended at time: %d\n", time(NULL));
   // wait for fault injection thread to exit
-  pthread_join(fault_thread, NULL);
+  // pthread_join(fault_thread, NULL);
   return testSuccess;
 }
 
@@ -780,12 +829,17 @@ int main(int argc, char* argv[]) {
 
   while(1) {
     int c;
-    c = getopt_long(argc, argv, "t:g:b:e:i:f:n:m:w:p:c:o:d:r:z:y:T:hG:C:a:", longopts, &longindex);
+    c = getopt_long(argc, argv, "s:t:g:b:e:i:f:n:m:w:p:c:o:d:r:z:y:T:hG:C:a:", longopts, &longindex);
 
     if (c == -1)
       break;
 
     switch(c) {
+      // GIULIO added option for output stats file path
+      case 's':
+        strcpy(stats_file, optarg);
+        log_printf("Stats file path: %s\n", stats_file);
+        break;
       case 't':
         nThreads = strtol(optarg, NULL, 0);
         break;
@@ -1095,7 +1149,7 @@ testResult_t run() {
   // pthread_t fault_thread;
   // pthread_create(&fault_thread, NULL, inject_fault, NULL);
 
-  // printf("Fault injection thread launched at time: %d\n", time(NULL));
+  // log_printf("Fault injection thread launched at time: %d\n", time(NULL));
 
   // wait for fault injection thread to finish
   // pthread_join(fault_thread, NULL);
