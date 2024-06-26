@@ -14,6 +14,8 @@
 
 #include <time.h>
 #include <string.h> // strcpy
+#include <atomic>
+#include <unistd.h>
 
 #include "../verifiable/verifiable.h"
 
@@ -31,8 +33,11 @@
 
 // GIULIO global variable with output stats file path
 char stats_file[64] = STATS_FILE;
-bool test_running = false;
+std::atomic<bool> test_running(false);
 struct timespec test_completion_tstamp;
+// check if stats file exists
+bool is_ctrl_env = false;
+
 
 int test_ncclVersion = 0; // init'd with ncclGetVersion()
 
@@ -522,6 +527,9 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
              bench_tstamp.tv_sec, bench_tstamp.tv_nsec); // GIULIO
 
   double deltaSec = tim.elapsed();
+
+  // TODO join thread
+
   deltaSec = deltaSec/(iters*agg_iters);
   if (cudaGraphLaunches >= 1) deltaSec = deltaSec/cudaGraphLaunches;
   Allreduce(args, &deltaSec, average);
@@ -611,18 +619,22 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
   if (args->reportErrors) {
     PRINT("  %7s  %6.2f  %6.2f  %5g", timeStr, algBw, busBw, (double)wrongElts);
     // GIULIO
-    fptr = fopen(stats_file, "a");
-    fprintf(fptr, ",%s,%.2f,%.2f,%g,%llu,%llu",
-            timeStr, algBw, busBw, (double)wrongElts,
-            test_completion_tstamp.tv_sec, test_completion_tstamp.tv_nsec);
-    fclose(fptr);
+    if (is_ctrl_env) {
+      fptr = fopen(stats_file, "a");
+      fprintf(fptr, ",%s,%.2f,%.2f,%g,%llu,%llu",
+              timeStr, algBw, busBw, (double)wrongElts,
+              test_completion_tstamp.tv_sec, test_completion_tstamp.tv_nsec);
+      fclose(fptr);
+    }
   } else {
     PRINT("  %7s  %6.2f  %6.2f  %5s", timeStr, algBw, busBw, "N/A");
-    fptr = fopen(stats_file, "a");
-    fprintf(fptr, ",%s,%.2f,%.2f,%g,%llu,%llu",
-            timeStr, algBw, busBw, "N/A",
-            test_completion_tstamp.tv_sec, test_completion_tstamp.tv_nsec);
-    fclose(fptr);
+    if (is_ctrl_env) {
+      fptr = fopen(stats_file, "a");
+      fprintf(fptr, ",%s,%.2f,%.2f,%g,%llu,%llu",
+              timeStr, algBw, busBw, "N/A",
+              test_completion_tstamp.tv_sec, test_completion_tstamp.tv_nsec);
+      fclose(fptr);
+    }
   }
 
   args->bw[0] += busBw;
@@ -671,9 +683,11 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* 
       sprintf(rootName, "%i", root);
       PRINT("%12li  %12li  %8s  %6s  %6s", max(args->sendBytes, args->expectedBytes), args->nbytes / wordSize(type), typeName, opName, rootName);
       // GIULIO write to file
-      fptr = fopen(STATS_FILE, "a");
-      fprintf(fptr, "%li,%li,%s,%s,%s", max(args->sendBytes, args->expectedBytes), args->nbytes / wordSize(type), typeName, opName, rootName);
-      fclose(fptr);
+      if (is_ctrl_env) {
+        fptr = fopen(stats_file, "a");
+        fprintf(fptr, "%li,%li,%s,%s,%s", max(args->sendBytes, args->expectedBytes), args->nbytes / wordSize(type), typeName, opName, rootName);
+        fclose(fptr);
+      }
       //GIULIO warmup done, test starting, ready to inject fault
       log_printf("warmup done at time: %d\n", time(NULL));
       // only do in place test
@@ -683,9 +697,11 @@ testResult_t TimeTest(struct threadArgs* args, ncclDataType_t type, const char* 
       // log_printf("test done at time: %d\n", time(NULL));
       //GIULIO test done, set boolean variable to 1
       PRINT("\n");
-      fptr = fopen(stats_file, "a");
-      fprintf(fptr, "\n");
-      fclose(fptr);
+      if (is_ctrl_env) {
+        fptr = fopen(stats_file, "a");
+        fprintf(fptr, "\n");
+        fclose(fptr);
+      }
   }
   return testSuccess;
 }
@@ -776,6 +792,11 @@ testResult_t AllocateBuffs(void **sendbuff, size_t sendBytes, void **recvbuff, s
 testResult_t run(); // Main function
 
 int main(int argc, char* argv[]) {
+  // check if controller
+  if (access("/root/nccl-tests-dev/is_controller", F_OK) == 0) {
+    is_ctrl_env = true;
+  }
+
   // Make sure everyline is flushed so that we see the progress of the test
   setlinebuf(stdout);
 
