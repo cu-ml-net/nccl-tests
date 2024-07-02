@@ -38,6 +38,9 @@ struct timespec test_completion_tstamp;
 // check if stats file exists
 bool is_ctrl_env = false;
 
+// global variable for fault injection
+bool inject_fault_flag = false;
+
 
 int test_ncclVersion = 0; // init'd with ncclGetVersion()
 
@@ -427,9 +430,11 @@ testResult_t completeColl(struct threadArgs* args) {
   return testSuccess;
 }
 
-void inject_fault(void){}
+extern "C" void inject_fault(void);
 
-void remove_fault(void){}
+extern "C" void remove_fault(void);
+
+extern "C" void check_faults(void);
 
 // GIULIO fault injection thread
 void* fault_inj_thread(void* arg) {
@@ -442,7 +447,8 @@ void* fault_inj_thread(void* arg) {
     return NULL;
   }
   // inject fault
-  inject_fault();
+  if(is_ctrl_env && inject_fault_flag)
+    inject_fault();
   clock_gettime(CLOCK_REALTIME, &test_completion_tstamp);
   log_printf("Injecting fault at time: %llu,%llu\n", test_completion_tstamp.tv_sec, test_completion_tstamp.tv_nsec);
   return NULL;
@@ -521,12 +527,15 @@ testResult_t BenchTime(struct threadArgs* args, ncclDataType_t type, ncclRedOp_t
   TESTCHECK(completeColl(args));
 
   // test_running = false;
-  remove_fault();
+  // remove_fault();
   clock_gettime(CLOCK_REALTIME, &bench_tstamp);
   log_printf("Performance bench ended and fault removed at time: %llu,%llu\n",
              bench_tstamp.tv_sec, bench_tstamp.tv_nsec); // GIULIO
 
   double deltaSec = tim.elapsed();
+
+  if(is_ctrl_env && inject_fault_flag)
+    remove_fault();
 
   // TODO join thread
 
@@ -793,8 +802,12 @@ testResult_t run(); // Main function
 
 int main(int argc, char* argv[]) {
   // check if controller
-  if (access("/root/nccl-tests-dev/is_controller", F_OK) == 0) {
+  if (access("/root/nccl-tests/is_controller", F_OK) == 0) {
     is_ctrl_env = true;
+    // check that there are no active faults
+    log_printf("Checking for active faults...\n");
+    remove_fault();
+    check_faults();
   }
 
   // Make sure everyline is flushed so that we see the progress of the test
@@ -850,12 +863,16 @@ int main(int argc, char* argv[]) {
 
   while(1) {
     int c;
-    c = getopt_long(argc, argv, "s:t:g:b:e:i:f:n:m:w:p:c:o:d:r:z:y:T:hG:C:a:", longopts, &longindex);
+    c = getopt_long(argc, argv, "js:t:g:b:e:i:f:n:m:w:p:c:o:d:r:z:y:T:hG:C:a:", longopts, &longindex);
 
     if (c == -1)
       break;
 
     switch(c) {
+      // option for fault injection
+      case 'j':
+        inject_fault_flag = true;
+        break;
       // GIULIO added option for output stats file path
       case 's':
         strcpy(stats_file, optarg);
